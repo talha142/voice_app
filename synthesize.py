@@ -131,11 +131,26 @@ def _synthesize_chunk(text_chunk: str, output_path: str, voice: str) -> None:
 
     return str(final_mp3)
 
-def _synthesize_chunk_gtts(text_chunk: str, output_path: str) -> None:
-    """Synthesizes a single chunk using gTTS (Google Text-to-Speech) as fallback."""
+def _synthesize_chunk_gtts(text_chunk: str, output_path: str, voice: str = "en-US") -> None:
+    """Synthesizes a single chunk using gTTS with accent support."""
     from gtts import gTTS
+    
+    # Map Edge TTS voice codes to gTTS accents (TLDs)
+    tld_map = {
+        "en-US": "com",
+        "en-GB": "co.uk",
+        "en-AU": "com.au",
+        "en-IE": "ie",
+        "en-IN": "co.in",
+        "en-ZA": "co.za"
+    }
+    
+    # Extract country code from voice string (e.g., "en-US-AriaNeural" -> "en-US")
+    country_code = "-".join(voice.split("-")[:2])
+    tld = tld_map.get(country_code, "com")
+    
     try:
-        tts = gTTS(text=text_chunk, lang='en')
+        tts = gTTS(text=text_chunk, lang='en', tld=tld)
         tts.save(output_path)
     except Exception as e:
         raise RuntimeError(f"gTTS fallback failed: {e}")
@@ -170,10 +185,10 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
                 print(f"Edge TTS failed for chunk {idx}, switching to fallback (gTTS). Error: {e}")
                 use_fallback = True
                 # Retry this chunk with fallback
-                _synthesize_chunk_gtts(chunk, str(chunk_file))
+                _synthesize_chunk_gtts(chunk, str(chunk_file), voice)
         else:
             # Continue with fallback
-            _synthesize_chunk_gtts(chunk, str(chunk_file))
+            _synthesize_chunk_gtts(chunk, str(chunk_file), voice)
         
         if chunk_file.exists():
             chunk_files.append(str(chunk_file))

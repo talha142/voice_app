@@ -82,11 +82,20 @@ def split_text_smart(text: str, max_chars: int = MAX_CHARS) -> List[str]:
     return chunks
 
 async def _synthesize_chunk(text_chunk: str, output_path: str, voice: str) -> None:
-    """Synthesizes a single chunk of text to file."""
+    """Synthesizes a single chunk of text to file with retries."""
     if not text_chunk.strip():
         return
-    communicate = edge_tts.Communicate(text_chunk, voice)
-    await communicate.save(output_path)
+        
+    retries = 3
+    for attempt in range(retries):
+        try:
+            communicate = edge_tts.Communicate(text_chunk, voice)
+            await communicate.save(output_path)
+            return
+        except Exception as e:
+            if attempt == retries - 1:
+                raise RuntimeError(f"Failed to synthesize chunk after {retries} attempts: {e}")
+            await asyncio.sleep(1)  # Wait before retry
 
 def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_callback=None) -> str:
     """

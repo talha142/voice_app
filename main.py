@@ -69,14 +69,35 @@ if generate_btn:
             def update_progress(p):
                 progress_bar.progress(p, text=f"Generating speech... {int(p*100)}%")
 
-            mp3_path = synthesize_text_to_mp3(text, voice_code, progress_callback=update_progress)
+            @st.cache_data(show_spinner=False)
+            def generate_audio_cached(text_input, voice_name):
+                # Call the synthesis function
+                path = synthesize_text_to_mp3(text_input, voice_name, progress_callback=None)
+                # Read bytes immediately into memory
+                return Path(path).read_bytes()
+
+            # We pass None for progress callback to cached function because it can't pickle the callback easily
+            # and caching means we skip progress on subsequent runs anyway.
+            # For the *first* run, we want progress, but st.cache_data makes that tricky.
+            # Compromise: We run it directly if we want progress, OR we just cache the result.
+            # Actually, to fix the "disconnect" issue, caching the BYTES is best.
+            
+            # Let's use the cached version. 
+            # Note: Progress bar won't update smoothly inside a cached function on first run 
+            # if we don't pass the callback. 
+            # But passing a callback to a cached function invalidates cache if callback changes.
+            
+            # Revised approach: Just cache the bytes generation.
+            audio_bytes = generate_audio_cached(text, voice_code)
+            
+            progress_bar.progress(1.0, text="Done!")
             
             progress_bar.progress(1.0, text="Done!")
             st.success("✅ Speech generated successfully!")
 
             # Audio player and download
-            mp3_file = Path(mp3_path)
-            audio_bytes = mp3_file.read_bytes()
+            # mp3_file = Path(mp3_path) # No longer needed
+            # audio_bytes = mp3_file.read_bytes() # Already have bytes
             
             st.audio(audio_bytes, format="audio/mp3")
             

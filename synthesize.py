@@ -1,15 +1,9 @@
-import asyncio
 import os
 import tempfile
 import shutil
 import subprocess
 from pathlib import Path
 from typing import List
-import edge_tts
-import nest_asyncio
-
-# Apply nest_asyncio to allow nested event loops
-nest_asyncio.apply()
 
 # --- Configuration ---
 MAX_CHARS = 2000
@@ -81,25 +75,47 @@ def split_text_smart(text: str, max_chars: int = MAX_CHARS) -> List[str]:
         
     return chunks
 
-async def _synthesize_chunk(text_chunk: str, output_path: str, voice: str) -> None:
-    """Synthesizes a single chunk of text to file with retries."""
+def _synthesize_chunk(text_chunk: str, output_path: str, voice: str) -> None:
+    """Synthesizes a single chunk of text to file using subprocess CLI."""
     if not text_chunk.strip():
         return
         
+    # Use edge-tts CLI directly to avoid asyncio conflicts
+    cmd = [
+        "edge-tts",
+        "--voice", voice,
+        "--text", text_chunk,
+        "--write-media", output_path
+    ]
+    
+    # Retry logic for robustness
     retries = 3
     for attempt in range(retries):
         try:
-            communicate = edge_tts.Communicate(text_chunk, voice)
-            await communicate.save(output_path)
+            print(f"Running command: {' '.join(cmd)}")
+            # Run command, capturing output for debug if needed
+            # Set a timeout (e.g., 60 seconds) to prevent hanging indefinitely
+            result = subprocess.run(
+                cmd, 
+                check=True, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=60
+            )
             return
-        except Exception as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            error_msg = str(e.stderr) if isinstance(e, subprocess.CalledProcessError) else "Timeout expired"
+            print(f"Attempt {attempt+1}/{retries} failed: {error_msg}")
             if attempt == retries - 1:
-                raise RuntimeError(f"Failed to synthesize chunk after {retries} attempts: {e}")
-            await asyncio.sleep(1)  # Wait before retry
+                raise RuntimeError(f"TTS CLI failed after {retries} attempts: {error_msg}")
+            # Wait briefly before retry
+            import time
+            time.sleep(2)
 
 def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_callback=None) -> str:
     """
-    Synthesizes long text to a single MP3 file using edge-tts and ffmpeg concatenation.
+    Synthesizes long text to a single MP3 file using edge-tts CLI and ffmpeg concatenation.
     Returns path to final mp3.
     """
     ffmpeg_exe = get_ffmpeg_path()
@@ -110,19 +126,14 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
     
     total_chunks = len(chunks)
     
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
     for idx, chunk in enumerate(chunks):
         if not chunk.strip():
             continue
             
         chunk_file = Path(tmp_dir) / f"chunk_{idx}.mp3"
         
-        loop.run_until_complete(_synthesize_chunk(chunk, str(chunk_file), voice))
+        # Call synchronous chunk synthesizer
+        _synthesize_chunk(chunk, str(chunk_file), voice)
         
         if chunk_file.exists():
             chunk_files.append(str(chunk_file))
@@ -145,7 +156,6 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
     final_mp3 = Path(tmp_dir) / "final_output.mp3"
     
     # Run ffmpeg command
-    # ffmpeg -f concat -safe 0 -i mylist.txt -c copy output.mp3
     cmd = [
         ffmpeg_exe,
         "-f", "concat",

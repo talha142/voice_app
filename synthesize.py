@@ -9,8 +9,12 @@ from typing import List
 import edge_tts
 
 # --- Configuration ---
-MAX_CHARS = 2000  # Keep under 2500 to avoid TTS errors
+MAX_CHARS = 2000  # Under 2500 to avoid TTS API issues
 
+
+# ---------------------------------------------------------
+# FFmpeg Detection
+# ---------------------------------------------------------
 def get_ffmpeg_path() -> str:
     """Finds a valid FFmpeg executable."""
     try:
@@ -37,15 +41,20 @@ def get_ffmpeg_path() -> str:
 
     raise FileNotFoundError("FFmpeg not found. Please install and add to PATH.")
 
+
+# ---------------------------------------------------------
+# Smart Chunking
+# ---------------------------------------------------------
 def split_text_smart(text: str, max_chars: int = MAX_CHARS) -> List[str]:
-    """Smart chunking based on sentence boundaries."""
+    """Split text intelligently into sentence-based chunks."""
     if len(text) <= max_chars:
         return [text]
 
     chunks = []
     current_chunk = ""
 
-    sentences = text.replace('!', '!|').replace('?', '?|').replace('.', '.|').split('|')
+    # Split sentences with markers
+    sentences = text.replace("!", "!|").replace("?", "?|").replace(".", ".|").split("|")
 
     for sentence in sentences:
         sentence = sentence.strip()
@@ -64,18 +73,40 @@ def split_text_smart(text: str, max_chars: int = MAX_CHARS) -> List[str]:
 
     return chunks
 
-async def _synthesize_chunk_async(text_chunk: str, output_path: str, voice: str) -> None:
-    """Generate individual chunk using edge-tts."""
+
+# ---------------------------------------------------------
+# Async TTS Generation (Safe With Retries)
+# ---------------------------------------------------------
+async def _synthesize_chunk_async(text_chunk: str, output_path: str, voice: str, retries=3):
+    """Generate a chunk using Edge-TTS with retry and output validation."""
     if not text_chunk.strip():
         return
-    try:
-        communicate = edge_tts.Communicate(text_chunk, voice)
-        await communicate.save(output_path)
-    except Exception as e:
-        raise RuntimeError(f"TTS chunk synthesis failed: {str(e)}")
 
+    for attempt in range(1, retries + 1):
+        try:
+            communicate = edge_tts.Communicate(text_chunk, voice)
+            await communicate.save(output_path)
+
+            # Validate audio file
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 500:
+                return  # SUCCESS
+
+            # If audio empty → retry
+            if attempt < retries:
+                continue
+
+            raise RuntimeError("No audio was received for this chunk.")
+
+        except Exception as e:
+            if attempt == retries:
+                raise RuntimeError(f"TTS chunk failed after retries: {e}")
+
+
+# ---------------------------------------------------------
+# Run Async Loop Safely
+# ---------------------------------------------------------
 def _run_async_synthesis(chunks: List[str], tmp_dir: str, voice: str, progress_callback=None) -> List[str]:
-    """Executes synthesis in a safe async event loop."""
+    """Creates an async loop and generates all chunks reliably."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -88,35 +119,48 @@ def _run_async_synthesis(chunks: List[str], tmp_dir: str, voice: str, progress_c
                 continue
 
             chunk_file = Path(tmp_dir) / f"TTS_chunk_{i}.mp3"
-            loop.run_until_complete(_synthesize_chunk_async(chunk, str(chunk_file), voice))
 
-            if not chunk_file.exists() or os.path.getsize(chunk_file) < 500:
-                raise RuntimeError(f"Chunk {i} generated empty or invalid audio!")
+            loop.run_until_complete(
+                _synthesize_chunk_async(chunk, str(chunk_file), voice)
+            )
+
+            # Final validation
+            if not chunk_file.exists() or os.path.getsize(chunk_file) <= 500:
+                raise RuntimeError(f"Chunk {i} produced EMPTY audio (after retry).")
 
             chunk_files.append(str(chunk_file))
 
             if progress_callback:
                 progress_callback((i + 1) / total_chunks)
+
     finally:
         loop.close()
 
     return chunk_files
 
+
+# ---------------------------------------------------------
+# Main TTS Function
+# ---------------------------------------------------------
 def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_callback=None) -> str:
-    """Main function - synthesizes full text into a single MP3 via concatenation."""
+    """Converts long text into high-quality MP3 using chunking + FFmpeg."""
     ffmpeg_exe = get_ffmpeg_path()
 
     if not text.strip():
         raise ValueError("Input text is empty!")
 
+    # Create temp dir
     tmp_dir = tempfile.mkdtemp()
     chunks = split_text_smart(text)
 
     results = {"chunk_files": [], "error": None}
 
+    # Run synthesis in a worker thread
     def synthesis_worker():
         try:
-            results["chunk_files"] = _run_async_synthesis(chunks, tmp_dir, voice, progress_callback)
+            results["chunk_files"] = _run_async_synthesis(
+                chunks, tmp_dir, voice, progress_callback
+            )
         except Exception as e:
             results["error"] = str(e)
 
@@ -129,8 +173,9 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
 
     chunk_files = results["chunk_files"]
     if not chunk_files:
-        raise RuntimeError("No audio chunks were generated! Possibly invalid text.")
+        raise RuntimeError("No audio chunks were generated!")
 
+    # Create FFmpeg concat filelist
     list_file = Path(tmp_dir) / "chunks.txt"
     with open(list_file, "w", encoding="utf-8") as f:
         for file in chunk_files:
@@ -139,9 +184,18 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
 
     final_mp3 = Path(tmp_dir) / "speech_output.mp3"
 
+    # FFmpeg concat
     try:
         subprocess.run(
-            [ffmpeg_exe, "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-y", str(final_mp3)],
+            [
+                ffmpeg_exe,
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_file),
+                "-c", "copy",
+                "-y",
+                str(final_mp3)
+            ],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -150,6 +204,6 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
         raise RuntimeError(f"FFmpeg failed: {e.stderr.decode()}")
 
     if not final_mp3.exists() or os.path.getsize(final_mp3) < 500:
-        raise RuntimeError("Final MP3 file was not generated properly!")
+        raise RuntimeError("Final MP3 not generated properly!")
 
     return str(final_mp3)

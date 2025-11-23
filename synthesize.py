@@ -113,9 +113,36 @@ def _synthesize_chunk(text_chunk: str, output_path: str, voice: str) -> None:
             import time
             time.sleep(2)
 
+    # Run ffmpeg command
+    cmd = [
+        ffmpeg_exe,
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(list_file_path),
+        "-c", "copy",
+        "-y",  # Overwrite if exists
+        str(final_mp3)
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"FFmpeg concatenation failed: {e.stderr.decode()}")
+
+    return str(final_mp3)
+
+def _synthesize_chunk_gtts(text_chunk: str, output_path: str) -> None:
+    """Synthesizes a single chunk using gTTS (Google Text-to-Speech) as fallback."""
+    from gtts import gTTS
+    try:
+        tts = gTTS(text=text_chunk, lang='en')
+        tts.save(output_path)
+    except Exception as e:
+        raise RuntimeError(f"gTTS fallback failed: {e}")
+
 def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_callback=None) -> str:
     """
-    Synthesizes long text to a single MP3 file using edge-tts CLI and ffmpeg concatenation.
+    Synthesizes long text to a single MP3 file using edge-tts CLI (primary) or gTTS (fallback).
     Returns path to final mp3.
     """
     ffmpeg_exe = get_ffmpeg_path()
@@ -126,14 +153,27 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
     
     total_chunks = len(chunks)
     
+    # Determine if we should use fallback globally for this request after first failure
+    use_fallback = False
+    
     for idx, chunk in enumerate(chunks):
         if not chunk.strip():
             continue
             
         chunk_file = Path(tmp_dir) / f"chunk_{idx}.mp3"
         
-        # Call synchronous chunk synthesizer
-        _synthesize_chunk(chunk, str(chunk_file), voice)
+        if not use_fallback:
+            try:
+                # Try primary engine (Edge TTS)
+                _synthesize_chunk(chunk, str(chunk_file), voice)
+            except RuntimeError as e:
+                print(f"Edge TTS failed for chunk {idx}, switching to fallback (gTTS). Error: {e}")
+                use_fallback = True
+                # Retry this chunk with fallback
+                _synthesize_chunk_gtts(chunk, str(chunk_file))
+        else:
+            # Continue with fallback
+            _synthesize_chunk_gtts(chunk, str(chunk_file))
         
         if chunk_file.exists():
             chunk_files.append(str(chunk_file))

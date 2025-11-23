@@ -1,5 +1,6 @@
 streamlit>=1.30.0
 edge-tts>=6.1.9
 pydub>=0.25.1
+nest_asyncio>=1.5.8
 imageio-ffmpeg>=0.4.9
 

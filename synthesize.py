@@ -3,13 +3,10 @@ import os
 import tempfile
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import List
 import edge_tts
-import nest_asyncio
-
-# Apply nest_asyncio to allow nested event loops
-nest_asyncio.apply()
 
 # --- Configuration ---
 MAX_CHARS = 2000
@@ -81,45 +78,77 @@ def split_text_smart(text: str, max_chars: int = MAX_CHARS) -> List[str]:
         
     return chunks
 
-async def _synthesize_chunk(text_chunk: str, output_path: str, voice: str) -> None:
-    """Synthesizes a single chunk of text to file."""
+async def _synthesize_chunk_async(text_chunk: str, output_path: str, voice: str) -> None:
+    """Async function to synthesize a single chunk."""
     if not text_chunk.strip():
         return
     communicate = edge_tts.Communicate(text_chunk, voice)
+    print(f"DEBUG: Synthesizing chunk. Voice: {voice}, Text len: {len(text_chunk)}")
     await communicate.save(output_path)
+
+def _run_async_synthesis(chunks: List[str], tmp_dir: str, voice: str, progress_callback=None) -> List[str]:
+    """
+    Runs the async synthesis loop in the current thread (which should be a new thread).
+    Returns a list of generated file paths.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    chunk_files = []
+    total_chunks = len(chunks)
+    
+    try:
+        for idx, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+                
+            chunk_file = Path(tmp_dir) / f"chunk_{idx}.mp3"
+            
+            # Run the async task in this dedicated loop
+            loop.run_until_complete(_synthesize_chunk_async(chunk, str(chunk_file), voice))
+            
+            if chunk_file.exists():
+                chunk_files.append(str(chunk_file))
+                
+            if progress_callback:
+                # Note: callback is called from this thread, ensure it's thread-safe if updating UI directly
+                # Streamlit handles this via script runner context usually, but simple updates are often fine.
+                progress_callback((idx + 1) / total_chunks)
+    finally:
+        loop.close()
+        
+    return chunk_files
 
 def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_callback=None) -> str:
     """
     Synthesizes long text to a single MP3 file using edge-tts and ffmpeg concatenation.
+    Runs async synthesis in a separate thread to avoid Streamlit event loop conflicts.
     Returns path to final mp3.
     """
     ffmpeg_exe = get_ffmpeg_path()
     
     tmp_dir = tempfile.mkdtemp()
     chunks = split_text_smart(text)
-    chunk_files = []
     
-    total_chunks = len(chunks)
+    # Container for results from the thread
+    results = {"chunk_files": [], "error": None}
     
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    def thread_target():
+        try:
+            results["chunk_files"] = _run_async_synthesis(chunks, tmp_dir, voice, progress_callback)
+        except Exception as e:
+            results["error"] = e
 
-    for idx, chunk in enumerate(chunks):
-        if not chunk.strip():
-            continue
-            
-        chunk_file = Path(tmp_dir) / f"chunk_{idx}.mp3"
+    # Start the synthesis thread
+    thread = threading.Thread(target=thread_target)
+    thread.start()
+    thread.join()
+    
+    # Check for errors from thread
+    if results["error"]:
+        raise results["error"]
         
-        loop.run_until_complete(_synthesize_chunk(chunk, str(chunk_file), voice))
-        
-        if chunk_file.exists():
-            chunk_files.append(str(chunk_file))
-            
-        if progress_callback:
-            progress_callback((idx + 1) / total_chunks)
+    chunk_files = results["chunk_files"]
 
     if not chunk_files:
         raise ValueError("No audio chunks generated! Text might be empty or invalid.")
@@ -136,7 +165,6 @@ def synthesize_text_to_mp3(text: str, voice: str = "en-US-AriaNeural", progress_
     final_mp3 = Path(tmp_dir) / "final_output.mp3"
     
     # Run ffmpeg command
-    # ffmpeg -f concat -safe 0 -i mylist.txt -c copy output.mp3
     cmd = [
         ffmpeg_exe,
         "-f", "concat",

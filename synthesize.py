@@ -83,7 +83,6 @@ async def _synthesize_chunk_async(text_chunk: str, output_path: str, voice: str)
     if not text_chunk.strip():
         return
     communicate = edge_tts.Communicate(text_chunk, voice)
-    print(f"DEBUG: Synthesizing chunk. Voice: {voice}, Text len: {len(text_chunk)}")
     await communicate.save(output_path)
 
 def _run_async_synthesis(chunks: List[str], tmp_dir: str, voice: str, progress_callback=None) -> List[str]:
